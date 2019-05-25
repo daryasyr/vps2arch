@@ -44,6 +44,68 @@ download() {
 	return 1
 }
 
+scan_packages() {
+	local local_packages="bash bash-completion bzip2 coreutils cryptsetup device-mapper diffutils file filesystem findutils gawk gcc-libs gettext glibc grep gzip inetutils iproute2 iputils less licenses linux linux-firmware man-db man-pages pacman pciutils perl procps-ng psmisc sed shadow sysfsutils systemd-sysvcompat tar texinfo usbutils util-linux which openssh"
+	# not supported: s-nail
+	case $bootloader in
+	'syslinux')
+		local_packages="$local_packages gptfdisk"
+		;;
+	'grub')
+		local_packages="$local_packages grub"
+		;;
+	esac
+	case $editor in
+	'vi')
+		local_packages="$local_packages vi"
+		;;
+	'vim')
+		local_packages="$local_packages vim"
+		;;
+	'nano')
+		local_packages="$local_packages nano"
+		;;
+	esac
+	case $network in
+	'netctl')
+		local_packages="$local_packages netctl"
+		;;
+	esac
+	local type=$(lsblk -npsro TYPE,FSTYPE | awk '{if($1=="part")print $2}')
+	for type in $type
+	do
+		case $type in
+		'ext2'|'ext3'|'ext4')
+			local_packages="$local_packages e2fsprogs"
+			;;
+		'btrfs')
+			local_packages="$local_packages btrfs-progs"
+			;;
+		'vfat')
+			local_packages="$local_packages dosfstools"
+			;;
+		'f2fs')
+			local_packages="$local_packages f2fs-tools"
+			;;
+		'jfs')
+			local_packages="$local_packages jfsutils"
+			;;
+		'nilfs2')
+			local_packages="$local_packages nilfs-utils"
+			;;
+		'reiserfs')
+			local_packages="$local_packages reiserfsprogs"
+			;;
+		'xfs')
+			local_packages="$local_packages xfsprogs"
+			;;
+		esac
+	done
+	[ $(ls /dev/md* 2> /dev/null | wc -l) != "0" ] && local_packages="$local_packages mdadm"
+	[ $(ls /dev/dm-* 2> /dev/null | wc -l) != "0" ] && local_packages="$local_packages lvm2"
+	echo $local_packages
+}
+
 download_and_extract_bootstrap() {
 	local sha1 filename
 	download iso/latest/sha1sums.txt | fgrep "$cpu_type.tar.gz" > "sha1sums.txt"
@@ -120,10 +182,6 @@ delete_all() {
 }
 
 install_packages() {
-	local packages="base openssh reflector"
-	[ "$bootloader" != "none" ] && packages="$packages $bootloader"
-	# XXX Install gptdisk for syslinux. To be removed then FS#45029 will be closed
-	[ "$bootloader" = "syslinux" ] && packages="$packages gptfdisk"
 	# Black magic!
 	"/root.$cpu_type/usr/lib"/ld-*.so --library-path "/root.$cpu_type/usr/lib" \
 		"/root.$cpu_type/usr/bin/chroot" "/root.$cpu_type" /usr/bin/pacstrap -M /mnt $packages
@@ -255,16 +313,22 @@ finalize() {
 
 	# Enable SSH login for user root (#3)
 	sed -i '/^#PermitRootLogin\s/s/.*/&\nPermitRootLogin yes/' /etc/ssh/sshd_config
-	
-	# Run reflector to get updated mirrors
-	
-	cat <<-EOF
-	
-		Reflector: Rating the 35 most recently synced HTTPS servers, sorting them by download speed
-		
-	EOF
-	
-	reflector -l 35 -p https --sort rate --save /etc/pacman.d/mirrorlist
+
+	sed -i 's/#en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/g' /etc/locale.gen
+	locale-gen
+
+	echo 'LANG=en_US.UTF-8' > /etc/locale.conf
+
+	echo '' >> /etc/hosts
+	echo '127.0.0.1	localhost' >> /etc/hosts
+	echo '::1		localhost' >> /etc/hosts
+
+	if [ "$editor" == "vim" ]; then
+		for var in 'edit' 'ex' 'vedit' 'vi' 'view'; do
+			ln -sf 'vim' "/usr/bin/${var}"
+			ln -sf 'vim.1.gz' "/usr/share/man/man1/${var}.1.gz"
+		done
+	fi
 
 	cat <<-EOF
 		Hi,
@@ -281,9 +345,11 @@ finalize() {
 
 bootloader=grub
 network=systemd-networkd
+editor=vim
+packages=$(scan_packages)
 mirrors=
 
-while getopts ":b:m:n:h" opt; do
+while getopts ":b:m:n:e:h" opt; do
 	case $opt in
 	b)
 		if ! [ "$OPTARG" = "grub" -o "$OPTARG" = "syslinux" -o "$OPTARG" = "none" ]; then
@@ -302,6 +368,13 @@ while getopts ":b:m:n:h" opt; do
 		fi
 		network="$OPTARG"
 		;;
+	e)
+		if ! [ "$OPTARG" = "vi" -o "$OPTARG" = "vim" -o "$OPTARG" = "nano" -o "$OPTARG" = "none" ]; then
+			echo "Invalid editor specified" >&2
+			exit 1
+		fi
+		editor="$OPTARG"
+		;;
 	h)
 		cat <<-EOF
 			usage: ${0##*/} [options]
@@ -309,6 +382,7 @@ while getopts ":b:m:n:h" opt; do
 			  Options:
 			    -b (grub|syslinux)           Use the specified bootloader. When this option is omitted, it defaults to grub.
 			    -n (systemd-networkd|netctl) Use the specified networking configuration system. When this option is omitted, it defaults to systemd-networkd.
+			    -e (vi|vim|nano)             Use the specified editor. When this option is omitted, it defaults to vim.
 			    -m mirror                    Use the provided mirror (you can specify this option more than once).
 
 			    -h                           Print this help message
@@ -339,6 +413,8 @@ if is_openvz; then
 elif is_lxc; then
 	bootloader=none
 fi
+
+echo "auto install packages: $packages"
 
 cd /
 download_and_extract_bootstrap
